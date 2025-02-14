@@ -106,7 +106,7 @@
         "maximum": 40,
         "default": 3,
         "examples": [1, 2, 3],
-        "description": "The number of worker threads to use for the sync.",
+        "description": "The number of test threads to use for the sync.",
         "order": 7
       }
     }
