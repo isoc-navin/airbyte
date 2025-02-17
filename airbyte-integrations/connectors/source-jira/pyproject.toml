@@ -18,7 +18,8 @@ include = "source_jira"
 [tool.poetry.dependencies]
 python = "^3.10,<3.12"
 airbyte-cdk = "^6"
-
+#psycopg2 = "^2.9"
+psycopg2-binary = "^2.9.10"
 [tool.poetry.scripts]
 source-jira = "source_jira.run:run"
 

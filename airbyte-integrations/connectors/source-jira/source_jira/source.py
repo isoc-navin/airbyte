@@ -1,10 +1,12 @@
 #
 # Copyright (c) 2024 Airbyte, Inc., all rights reserved.
 #
+from datetime import datetime, timedelta
 from logging import Logger
 from typing import Any, List, Mapping, Optional, Tuple
 
 import pendulum
+import pytz
 from pydantic import ValidationError
 from requests.exceptions import InvalidURL
 
@@ -15,17 +17,85 @@ from airbyte_cdk.sources.source import TState
 from airbyte_cdk.sources.streams.core import Stream
 from airbyte_cdk.sources.streams.http.requests_native_auth import BasicHttpAuthenticator
 from airbyte_cdk.utils.traced_exception import AirbyteTracedException
-
+from datetime import datetime, timedelta
 from .streams import IssueFields, Issues, PullRequests
 from .utils import read_full_refresh
-
+import psycopg2
 
 class SourceJira(YamlDeclarativeSource):
     def __init__(self, catalog: Optional[ConfiguredAirbyteCatalog], config: Optional[Mapping[str, Any]], state: TState, **kwargs):
         super().__init__(catalog=catalog, config=config, state=state, **{"path_to_yaml": "manifest.yaml"})
 
+        self.config = config
+        est_tz = pytz.timezone('US/Eastern')
+        backfill_clearance = config.get("backfill_clearance", "None")
+
+        # Handle start_date logic only for specific backfill_clearance values
+        if backfill_clearance in ["last_7_days_refresh", "last_15_days_refresh", "last_30_days_refresh"]:
+            middle_part = backfill_clearance.split("_")[1]
+            numeric_part = ''.join(char for char in middle_part if char.isdigit())  # Explicit generator expression
+            days = int(numeric_part)
+            today = datetime.now(est_tz)
+            self.date_start = (today - timedelta(days=days)).strftime("%Y-%m-%d")
+            self.date_stop = today.strftime("%Y-%m-%d")
+        else:
+            # Default fallback if backfill_clearance does not match
+            self.date_start = self.config["start_date"]
+            self.date_stop = self.config["end_date"]
+
+        self.backfill_date_start = self.config['backfill_date_start']
+        self.backfill_date_stop = self.config['backfill_date_stop']
     def check_connection(self, logger: Logger, config: Mapping[str, Any]) -> Tuple[bool, any]:
         try:
+            backfill_clearance = config.get("backfill_clearance", "None")
+            database = config.get("database")
+            username = config.get("username")
+            password = config.get("password")
+            host = config.get("host")
+            port = config.get("port")
+            schema = config.get("schema")
+            table_name = config.get("table_name")
+
+            if backfill_clearance in ["last_7_days_refresh", "last_15_days_refresh", "last_30_days_refresh"]:
+                # Calculate the date range for backfill clearance
+                middle_part = backfill_clearance.split("_")[1]
+                numeric_part = ''.join(char for char in middle_part if char.isdigit())  # Explicit generator expression
+                days = int(numeric_part)
+                est_tz = pytz.timezone('US/Eastern')
+                today = datetime.now(est_tz)
+                clear_start_date = (today - timedelta(days=days)).strftime("%Y-%m-%d")
+                clear_end_date = today.strftime("%Y-%m-%d")
+
+                try:
+                    # Connect to Redshift
+                    connection = psycopg2.connect(
+                        dbname=database,
+                        user=username,
+                        password=password,
+                        host=host,
+                        port=port
+                    )
+                    cursor = connection.cursor()
+
+                    # Build and execute the delete query
+                    delete_query = f"""
+                        DELETE FROM {schema}.{table_name}
+                        WHERE date_start BETWEEN '{clear_start_date}' AND '{clear_end_date}';
+                    """
+                    cursor.execute(delete_query)
+                    connection.commit()
+                    print(f"Data cleared in Redshift with query: {delete_query}")
+
+                except Exception as e:
+                    print(f"Error during Redshift backfill operation: {e}")
+                    raise
+                finally:
+                    if cursor:
+                        cursor.close()
+                    if connection:
+                        connection.close()
+
+            # Proceed with the remaining connection checks
             streams = self.streams(config)
             stream_name_to_stream = {s.name: s for s in streams}
 
